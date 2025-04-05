@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+    <color name="primary">#4CAF50</color>
+    <color name="primary_dark">#388E3C</color>
+    <color name="accent">#9C27B0</color>
+    <color name="background_dark">#1C1C1C</color>
+    
+    <!-- Process colors -->
+    <color name="process_ready">#FFEB3B</color>
+    <color name="process_running">#4CAF50</color>
+    <color name="process_blocked">#F44336</color>
+    <color name="process_terminated">#9E9E9E</color>
+    
+    <!-- UI colors -->
+    <color name="cpu_low">#4CAF50</color>
+    <color name="cpu_medium">#FFEB3B</color>
+    <color name="cpu_high">#F44336</color>
+    <color name="button_terminate">#F44336</color>
+    <color name="button_priority_up">#4CAF50</color>
+    <color name="button_priority_down">#2196F3</color>
+    <color name="button_unblock">#9C27B0</color>
+    <color name="text_light">#BBBBBB</color>
+</resources>

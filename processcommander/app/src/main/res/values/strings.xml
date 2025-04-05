@@ -1,0 +1,24 @@
+<resources>
+    <string name="app_name">Process Commander</string>
+    <string name="start_game">Start Game</string>
+    <string name="settings">Settings</string>
+    <string name="credits">Credits</string>
+    <string name="back_to_menu">Back to Menu</string>
+    <string name="save_settings">Save Settings</string>
+    <string name="difficulty">Difficulty:</string>
+    <string name="vibration">Vibration</string>
+    <string name="sound_effects">Sound Effects</string>
+    <string name="easy_setting">Easy - Fewer processes, slower pace</string>
+    <string name="medium_setting">Medium - Standard gameplay</string>
+    <string name="hard_setting">Hard - More processes, faster pace</string>
+    <string name="system_overload">SYSTEM OVERLOAD</string>
+    <string name="emergency_event">! EMERGENCY EVENT !</string>
+    <string name="final_score">Final Score: %1$d</string>
+    <string name="processes_completed">Processes Completed: %1$d</string>
+    <string name="emergencies_handled">Emergencies Handled: %1$d</string>
+    <string name="score">Score: %1$d</string>
+    <string name="completed">Completed: %1$d</string>
+    <string name="tap_to_return">Tap to return to menu</string>
+    <string name="cpu_usage">CPU: %1$d%%</string>
+    <string name="memory_usage">Memory: %1$d/%2$d MB</string>
+</resources>
