@@ -46,27 +46,30 @@ public class GameView extends SurfaceView implements SurfaceHolder.Callback, Run
     private RectF cpuBarBg, cpuBarFg;
     private RectF memoryBarBg, memoryBarFg;
     
-    // UI elements
-    private RectF terminateButton;
-    private RectF priorityUpButton;
-    private RectF priorityDownButton;
-    private RectF unblockButton;
-    
-    // Button labels
-    private String terminateLabel = "Terminate";
-    private String priorityUpLabel = "Priority +";
-    private String priorityDownLabel = "Priority -";
-    private String unblockLabel = "Unblock";
-    
-    // Button icons/symbols
-    private String terminateSymbol = "✘";  // X symbol
-    private String priorityUpSymbol = "▲";  // Up arrow
-    private String priorityDownSymbol = "▼";  // Down arrow
-    private String unblockSymbol = "►";  // Play button
+    // Queue areas
+    private RectF runningQueueArea;
+    private RectF readyQueueArea;
+    private RectF blockedQueueArea;
+    private RectF newProcessArea;
     
     // Action popup
     private PopupWindow actionPopup;
     private Process selectedProcess;
+    
+    // Dragging state
+    private boolean isDragging = false;
+    private float lastTouchX = 0;
+    private float lastTouchY = 0;
+    
+    // Constants for slot layout (Add these near other UI constants)
+    private static final int SLOTS_PER_ROW = 3; 
+    private static final float SLOT_SPACING = 15f;
+    
+    // UI Margins & Layout constants
+    private static final int MARGIN_TOP = 150; // Adjusted top margin slightly
+    private static final int MARGIN_BOTTOM = 50; // Reduced bottom margin as buttons are gone
+    private static final int QUEUE_AREA_HEIGHT = 180; // Adjusted height for queues
+    private static final int QUEUE_SPACING = 20;
     
     public GameView(Context context) {
         super(context);
@@ -87,12 +90,6 @@ public class GameView extends SurfaceView implements SurfaceHolder.Callback, Run
         cpuBarFg = new RectF();
         memoryBarBg = new RectF();
         memoryBarFg = new RectF();
-        
-        // Initialize action buttons
-        terminateButton = new RectF();
-        priorityUpButton = new RectF();
-        priorityDownButton = new RectF();
-        unblockButton = new RectF();
         
         // Set focusable to receive touch events
         setFocusable(true);
@@ -119,10 +116,23 @@ public class GameView extends SurfaceView implements SurfaceHolder.Callback, Run
     
     @Override
     public void surfaceCreated(SurfaceHolder holder) {
+        // Initialize UI elements based on actual dimensions
+        updateUIElements(getWidth(), getHeight());
+
+        // ---> Set Queue Area References in ProcessManager <--- 
+        // Pass the calculated areas to the ProcessManager so it knows where to place processes
+        if (processManager != null) {
+             processManager.setQueueAreaReferences(newProcessArea, runningQueueArea, readyQueueArea, blockedQueueArea);
+             processManager.repositionAllProcesses(); // Initial positioning in slots
+        }
+        
+        // Initialize game loop
+        if (gameThread == null || !gameThread.isAlive()) { // Check if thread is alive
+            gameThread = new Thread(this);
         isRunning = true;
-        gameThread = new Thread(this);
         gameThread.start();
         lastUpdateTime = System.currentTimeMillis();
+        }
     }
     
     @Override
@@ -142,40 +152,33 @@ public class GameView extends SurfaceView implements SurfaceHolder.Callback, Run
     }
     
     private void updateUIElements(int width, int height) {
-        // Add top margin to avoid status bar interference
-        float topMargin = statusBarHeight + 20; // Status bar height plus additional margin
-        
-        // Add bottom margin to avoid navigation bar interference
-        float bottomMargin = navigationBarHeight + 20; // Navigation bar height plus additional margin
-        
-        // CPU Bar (top left)
-        float barHeight = 60;
-        float barWidth = width * 0.45f;
-        float barMargin = 20;
-        cpuBarBg.set(barMargin, topMargin, barMargin + barWidth, topMargin + barHeight);
-        cpuBarFg.set(cpuBarBg);
-        
-        // Memory Bar (top right)
-        memoryBarBg.set(width - barMargin - barWidth, topMargin, width - barMargin, topMargin + barHeight);
-        memoryBarFg.set(memoryBarBg);
-        
-        // Action buttons (bottom)
-        float buttonSize = 150;
-        float buttonY = height - buttonSize - barMargin - bottomMargin;  // Account for navigation bar
-        float buttonSpacing = 30;
-        float buttonStartX = (width - (buttonSize * 4 + buttonSpacing * 3)) / 2;
-        
-        terminateButton.set(buttonStartX, buttonY, buttonStartX + buttonSize, buttonY + buttonSize);
-        priorityUpButton.set(buttonStartX + buttonSize + buttonSpacing, buttonY, 
-                          buttonStartX + buttonSize * 2 + buttonSpacing, buttonY + buttonSize);
-        priorityDownButton.set(buttonStartX + buttonSize * 2 + buttonSpacing * 2, buttonY, 
-                           buttonStartX + buttonSize * 3 + buttonSpacing * 2, buttonY + buttonSize);
-        unblockButton.set(buttonStartX + buttonSize * 3 + buttonSpacing * 3, buttonY, 
-                       buttonStartX + buttonSize * 4 + buttonSpacing * 3, buttonY + buttonSize);
-        
-        // Critical warning rectangle (center top)
-        criticalWarningRect = new RectF(width * 0.1f, topMargin + barHeight + 40, 
-                                      width * 0.9f, topMargin + barHeight + 140);
+        // Calculate available height
+        int availableHeight = height - MARGIN_TOP - MARGIN_BOTTOM - statusBarHeight - navigationBarHeight;
+        int totalQueueSpacing = 3 * QUEUE_SPACING; // Spacing between 4 areas
+        int calculatedQueueHeight = (availableHeight - totalQueueSpacing) / 4; // Divide height among 4 areas
+        int queueHeight = Math.max(150, calculatedQueueHeight); // Ensure minimum height
+
+        // Resource Bars (Top)
+        float barWidth = width * 0.8f;
+        float barHeight = 30f;
+        float barMargin = (width - barWidth) / 2;
+        cpuBarBg = new RectF(barMargin, MARGIN_TOP - 100, barMargin + barWidth, MARGIN_TOP - 100 + barHeight);
+        cpuBarFg = new RectF(cpuBarBg);
+        memoryBarBg = new RectF(barMargin, MARGIN_TOP - 50, barMargin + barWidth, MARGIN_TOP - 50 + barHeight);
+        memoryBarFg = new RectF(memoryBarBg);
+
+        // Queue Areas (Dynamic height, fixed width)
+        float queueAreaWidth = width * 0.9f;
+        float queueAreaMargin = (width - queueAreaWidth) / 2;
+        float currentTop = (float) MARGIN_TOP;
+
+        newProcessArea = new RectF(queueAreaMargin, currentTop, queueAreaMargin + queueAreaWidth, currentTop + queueHeight);
+        currentTop += queueHeight + QUEUE_SPACING;
+        runningQueueArea = new RectF(queueAreaMargin, currentTop, queueAreaMargin + queueAreaWidth, currentTop + queueHeight);
+        currentTop += queueHeight + QUEUE_SPACING;
+        readyQueueArea = new RectF(queueAreaMargin, currentTop, queueAreaMargin + queueAreaWidth, currentTop + queueHeight);
+        currentTop += queueHeight + QUEUE_SPACING;
+        blockedQueueArea = new RectF(queueAreaMargin, currentTop, queueAreaMargin + queueAreaWidth, currentTop + queueHeight);
     }
     
     @Override
@@ -223,16 +226,8 @@ public class GameView extends SurfaceView implements SurfaceHolder.Callback, Run
             if (processManager.isGameOver() && !gameOverHandled) {
                 gameOverHandled = true;
                 
-                // Set the game over reason
-                if (processManager.getUsedCPU() >= processManager.getTotalCPU()) {
-                    gameOverReason = "CPU OVERLOAD: Too many high-priority processes running simultaneously.";
-                } else if (processManager.getUsedMemory() >= processManager.getTotalMemory()) {
-                    gameOverReason = "MEMORY OVERLOAD: System ran out of available memory.";
-                } else if (processManager.isEmergencyEvent()) {
-                    gameOverReason = "CRITICAL FAILURE: Failed to handle emergency in time.";
-                } else {
-                    gameOverReason = "SYSTEM CRASH: Too many processes running simultaneously.";
-                }
+                // Get the specific reason from ProcessManager
+                String reason = processManager.getGameOverReason();
                 
                 // Notify game activity about game over
                 if (context instanceof GameActivity) {
@@ -240,7 +235,7 @@ public class GameView extends SurfaceView implements SurfaceHolder.Callback, Run
                         processManager.getScore(),
                         processManager.getProcessesCompleted(),
                         processManager.getEmergencyEventsHandled(),
-                        gameOverReason
+                        reason // Pass the reason
                     );
                 }
             }
@@ -280,29 +275,29 @@ public class GameView extends SurfaceView implements SurfaceHolder.Callback, Run
         try {
             canvas = surfaceHolder.lockCanvas();
             if (canvas != null) {
-                // Clear screen
                 canvas.drawColor(Color.BLACK);
                 
-                // Draw resource bars
+                // Draw resource bars FIRST
                 drawResourceBars(canvas);
                 
-                // Draw processes
-                processManager.draw(canvas, paint);
-                
-                // Draw action buttons
-                drawActionButtons(canvas);
-                
-                // Draw scores and status
+                // Draw Queue Backgrounds/Info SECOND
+                drawQueueInfo(canvas, newProcessArea, "New Processes", processManager.getNewProcesses().size(), processManager.getMaxProcessesCapacity(), Color.DKGRAY);
+                drawQueueInfo(canvas, runningQueueArea, "Running Queue", processManager.getRunningQueueSize(), processManager.getRunningQueueCapacity(), Color.rgb(0, 50, 0));
+                drawQueueInfo(canvas, readyQueueArea, "Ready Queue", processManager.getReadyQueueSize(), processManager.getReadyQueueCapacity(), Color.rgb(0, 0, 50));
+                drawQueueInfo(canvas, blockedQueueArea, "Blocked Queue", processManager.getBlockedQueueSize(), processManager.getBlockedQueueCapacity(), Color.rgb(50, 0, 0));
+
+                // Draw Processes THIRD (on top of queues)
+                processManager.draw(canvas, paint, this); // Pass GameView for blinking logic
+
+                // Draw scores and status (includes instruction overlay logic)
                 drawStatusInfo(canvas);
                 
-                // Draw game over message if needed
+                // Draw warnings / game over
+                if (processManager.isEmergencyEvent()) {
+                    drawCriticalWarning(canvas);
+                }
                 if (processManager.isGameOver()) {
                     drawGameOver(canvas);
-                }
-                
-                // Draw instructions if needed
-                if (showInstructions) {
-                    drawInstructions(canvas);
                 }
             }
         } finally {
@@ -374,109 +369,109 @@ public class GameView extends SurfaceView implements SurfaceHolder.Callback, Run
                        memoryBarBg.left, memoryBarBg.bottom + 30, paint);
     }
     
-    private void drawActionButtons(Canvas canvas) {
-        // Button style - common properties
-        float buttonRadius = 10f; // Rounded corners
-        paint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
-        
-        // Terminate Button (Red X)
-        drawButton(canvas, terminateButton, Color.rgb(200, 60, 60), terminateSymbol, terminateLabel);
-        
-        // Priority Up Button (Green arrow up)
-        drawButton(canvas, priorityUpButton, Color.rgb(60, 180, 60), priorityUpSymbol, priorityUpLabel);
-        
-        // Priority Down Button (Blue arrow down)
-        drawButton(canvas, priorityDownButton, Color.rgb(60, 120, 200), priorityDownSymbol, priorityDownLabel);
-        
-        // Unblock Button (Yellow Play)
-        drawButton(canvas, unblockButton, Color.rgb(200, 180, 40), unblockSymbol, unblockLabel);
-        
-        // Reset typeface
-        paint.setTypeface(Typeface.DEFAULT);
-    }
-    
-    // Helper method to draw a button with consistent styling
-    private void drawButton(Canvas canvas, RectF bounds, int color, String symbol, String label) {
-        // Button background with border
-        paint.setStyle(Paint.Style.FILL);
+    private void drawQueueInfo(Canvas canvas, RectF area, String queueName, int currentSize, int maxSize, int color) {
+        // Draw queue area background
         paint.setColor(color);
-        canvas.drawRoundRect(bounds, 15f, 15f, paint);
-        
-        // Button border
-        paint.setStyle(Paint.Style.STROKE);
-        paint.setStrokeWidth(4f);
-        paint.setColor(Color.WHITE);
-        canvas.drawRoundRect(bounds, 15f, 15f, paint);
-        
-        // Button symbol
+        paint.setAlpha(180); // Slightly transparent background
         paint.setStyle(Paint.Style.FILL);
+        canvas.drawRoundRect(area, 15f, 15f, paint);
+
+        // Draw queue area border
         paint.setColor(Color.WHITE);
-        paint.setTextSize(bounds.width() * 0.5f);
+        paint.setAlpha(255);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(2f);
+        canvas.drawRoundRect(area, 15f, 15f, paint);
+
+        // Draw queue title
+        paint.setStyle(Paint.Style.FILL);
+        paint.setTextSize(30);
         paint.setTextAlign(Paint.Align.CENTER);
-        canvas.drawText(symbol, bounds.centerX(), bounds.centerY() + bounds.width() * 0.15f, paint);
+        paint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
+        canvas.drawText(queueName, area.centerX(), area.top + 40, paint);
+
+        // Draw queue capacity text
+        paint.setTextSize(24);
+        paint.setTypeface(Typeface.DEFAULT);
+        canvas.drawText(currentSize + " / " + maxSize, area.centerX(), area.top + 75, paint);
         
-        // Button label
-        paint.setTextSize(bounds.width() * 0.15f);
-        canvas.drawText(label, bounds.centerX(), bounds.bottom + 30, paint);
+        // --- Draw Slot Outlines --- 
+        float slotWidth = (area.width() - (SLOTS_PER_ROW + 1) * SLOT_SPACING) / SLOTS_PER_ROW;
+        float slotHeight = (area.height() - 100 - (getRowCount(maxSize) + 1) * SLOT_SPACING) / getRowCount(maxSize); // Adjusted height calculation
+        slotHeight = Math.min(slotHeight, slotWidth * 1.2f); // Keep slots reasonably proportioned
+        
+        paint.setColor(Color.argb(50, 255, 255, 255)); // Faint white for slot outlines
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(1f);
+        
+        for (int i = 0; i < maxSize; i++) {
+            int row = i / SLOTS_PER_ROW;
+            int col = i % SLOTS_PER_ROW;
+            
+            float slotLeft = area.left + SLOT_SPACING + col * (slotWidth + SLOT_SPACING);
+            float slotTop = area.top + 90 + SLOT_SPACING + row * (slotHeight + SLOT_SPACING); // Start below title/capacity text
+            
+            RectF slotRect = new RectF(slotLeft, slotTop, slotLeft + slotWidth, slotTop + slotHeight);
+            canvas.drawRoundRect(slotRect, 10f, 10f, paint);
+        }
+        // --- End Slot Outlines ---
+
+        paint.setTypeface(Typeface.DEFAULT); // Reset typeface
+    }
+
+    // Helper to get number of rows needed for slots
+    private int getRowCount(int maxSize) {
+        return (int) Math.ceil((double) maxSize / SLOTS_PER_ROW);
     }
     
-    private void drawStatusInfo(Canvas canvas) {
-        float fontSize = 32; // Increased font size
-        float headerFontSize = 34; // Slightly larger for headers
-        
+    private void drawProcess(Canvas canvas, Process process) {
+        float size = 150; // Bigger process size
+        RectF bounds = new RectF(
+            process.getX() - size/2,
+            process.getY() - size/2,
+            process.getX() + size/2,
+            process.getY() + size/2
+        );
+
+        // Background color based on state
+        int backgroundColor;
+        if (process.isInterrupted()) {
+            backgroundColor = Color.RED; // Red for interrupted
+        } else if (process.isIOCompleted()) {
+            backgroundColor = Color.GREEN; // Green for I/O completed
+        } else {
+            backgroundColor = Color.BLUE; // Default color
+        }
+
+        // Draw process background
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(backgroundColor);
+        paint.setAlpha(180);
+        canvas.drawRoundRect(bounds, 20, 20, paint);
+
+        // Draw border if selected
+        if (process.isSelected()) {
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(6);
+            paint.setColor(Color.YELLOW);
+            canvas.drawRoundRect(bounds, 20, 20, paint);
+        }
+
+        // Draw process info
         paint.setStyle(Paint.Style.FILL);
         paint.setColor(Color.WHITE);
-        paint.setTextAlign(Paint.Align.LEFT);
-        paint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
-        
-        // CPU Usage
-        paint.setTextSize(headerFontSize);
-        canvas.drawText("CPU Usage:", cpuBarBg.left, cpuBarBg.top - 15, paint);
-        paint.setTextSize(fontSize);
-        int cpuPercentage = (int)((float)processManager.getUsedCPU() / processManager.getTotalCPU() * 100);
-        canvas.drawText(cpuPercentage + "%", cpuBarBg.right + 20, cpuBarBg.top + cpuBarBg.height()/2 + fontSize/3, paint);
-        
-        // Memory Usage
-        paint.setTextSize(headerFontSize);
-        paint.setTextAlign(Paint.Align.RIGHT);
-        canvas.drawText("Memory Usage:", memoryBarBg.right, memoryBarBg.top - 15, paint);
-        paint.setTextSize(fontSize);
-        int memoryPercentage = (int)((float)processManager.getUsedMemory() / processManager.getTotalMemory() * 100);
-        canvas.drawText(memoryPercentage + "%", memoryBarBg.left - 20, memoryBarBg.top + memoryBarBg.height()/2 + fontSize/3, paint);
-        
-        // Score and stats
+        paint.setTextSize(24); // Bigger text
         paint.setTextAlign(Paint.Align.CENTER);
-        paint.setTextSize(fontSize);
-        int screenWidth = getWidth();
-        int y = (int)(memoryBarBg.bottom + 50);
-        canvas.drawText("Score: " + processManager.getScore(), screenWidth/2, y, paint);
-        y += fontSize + 10;
-        canvas.drawText("Processes: " + processManager.getProcessesCompleted(), screenWidth/2, y, paint);
+
+        // Draw process name
+        canvas.drawText(process.getName(), bounds.centerX(), bounds.top + 40, paint);
         
-        // Draw emergency warning if active
-        if (processManager.isEmergencyEvent()) {
-            drawCriticalWarning(canvas);
-        }
+        // Draw priority
+        canvas.drawText("Priority: " + process.getPriority(), bounds.centerX(), bounds.centerY(), paint);
         
-        // Selection instruction when no process is selected
-        if (processManager.getSelectedProcess() == null) {
-            paint.setTextSize(fontSize);
-            paint.setColor(Color.YELLOW);
-            y = getHeight() - 220; // Position above buttons
-            canvas.drawText("Tap a process to select it", screenWidth/2, y, paint);
-        } else {
-            // Display selected process info
-            Process selected = processManager.getSelectedProcess();
-            paint.setTextSize(fontSize);
-            paint.setColor(Color.YELLOW);
-            y = getHeight() - 220; // Position above buttons
-            canvas.drawText("Selected: " + selected.getName() + " (Priority: " + selected.getPriority() + ")", 
-                           screenWidth/2, y, paint);
-        }
-        
-        // Reset text properties
-        paint.setTypeface(Typeface.DEFAULT);
-        paint.setTextAlign(Paint.Align.LEFT);
+        // Draw CPU time remaining
+        int secondsRemaining = (int)(process.getCpuTimeRemaining() / 1000);
+        canvas.drawText(secondsRemaining + "s", bounds.centerX(), bounds.bottom - 40, paint);
     }
     
     // Draw a critical warning banner
@@ -588,132 +583,214 @@ public class GameView extends SurfaceView implements SurfaceHolder.Callback, Run
         return lines.toArray(new String[0]);
     }
     
-    private void drawInstructions(Canvas canvas) {
-        int width = getWidth();
-        int height = getHeight();
+    private void drawStatusInfo(Canvas canvas) {
+        float fontSize = 32;
+        float headerFontSize = 34;
         
-        // Semi-transparent background
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(Color.argb(220, 0, 0, 0));
-        canvas.drawRect(0, 0, width, height, paint);
+        // If showing instructions, draw tutorial overlay
+        if (showInstructions) {
+            // Semi-transparent dark background
+            paint.setColor(Color.argb(200, 0, 0, 0));
+            canvas.drawRect(0, 0, getWidth(), getHeight(), paint);
+            
+            // Draw instruction box
+            float boxMargin = 50;
+            float boxWidth = getWidth() - 2 * boxMargin;
+            float boxHeight = getHeight() - 2 * boxMargin;
+            RectF instructionBox = new RectF(boxMargin, boxMargin, boxMargin + boxWidth, boxMargin + boxHeight);
+            
+            // Box background
+            paint.setColor(Color.rgb(30, 30, 50));
+            canvas.drawRoundRect(instructionBox, 20, 20, paint);
+            
+            // Box border
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setColor(Color.WHITE);
+            paint.setStrokeWidth(4);
+            canvas.drawRoundRect(instructionBox, 20, 20, paint);
         
         // Title
-        paint.setColor(Color.YELLOW);
-        paint.setTextSize(70);
+            paint.setStyle(Paint.Style.FILL);
+            paint.setTextSize(headerFontSize * 1.2f);
         paint.setTextAlign(Paint.Align.CENTER);
         paint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
-        canvas.drawText("HOW TO PLAY", width/2, height/4 - 80, paint);
-        
-        // Instructions text
-        paint.setColor(Color.WHITE);
-        paint.setTextSize(36);
+            canvas.drawText("Process Commander Tutorial", getWidth()/2, boxMargin + 80, paint);
+            
+            // Instructions
+            paint.setTextSize(fontSize * 0.9f);
+            paint.setTextAlign(Paint.Align.LEFT);
         paint.setTypeface(Typeface.DEFAULT);
+            float instructionX = boxMargin + 50;
+            float instructionY = boxMargin + 160;
+            float lineSpacing = fontSize * 1.5f;
         
         String[] instructions = {
-            "• Tap a process circle to select it",
-            "• Manage selected process using buttons below:",
-            "• " + terminateSymbol + " Terminate - Remove a process immediately",
-            "• " + priorityUpSymbol + " Priority + - Increase process importance",
-            "• " + priorityDownSymbol + " Priority - - Decrease process importance",
-            "• " + unblockSymbol + " Unblock - Activate a blocked process",
-            "• Monitor CPU and memory usage at top of screen",
-            "• Higher priority processes use more CPU resources"
-        };
-        
-        // Critical instructions with emphasis
-        String[] criticalInstructions = {
-            "❗ CRITICAL PROCESSES MUST BE UNBLOCKED IMMEDIATELY ❗",
-            "• Ignoring critical processes causes system penalties",
-            "• After 3 ignored critical processes, game over",
-            "• Critical processes display flashing borders"
-        };
-        
-        int y = height/4 - 20;
-        for (String instruction : instructions) {
-            canvas.drawText(instruction, width/2, y, paint);
-            y += 50;
+                "Welcome to Process Commander!",
+                "",
+                "Your goal is to manage system processes efficiently:",
+                "",
+                "• Drag processes between queues to manage them:",
+                "  - Running Queue (Green): Active processes using CPU",
+                "  - Ready Queue (Blue): Processes waiting to run",
+                "  - Blocked Queue (Red): Processes waiting for I/O",
+                "",
+                "• Watch out for:",
+                "  - Critical processes (Red text) - Handle immediately!",
+                "  - Process interrupts (Yellow text) - Move to blocked queue",
+                "  - Process starvation - Don't leave processes waiting too long",
+                "  - CPU and Memory usage - Don't overload the system",
+                "",
+                "• Use the buttons at the bottom to:",
+                "  - Terminate: Remove problematic processes",
+                "  - Unblock: Move processes back to ready state",
+                "",
+                "Tap anywhere to start!"
+            };
+            
+            for (String instruction : instructions) {
+                canvas.drawText(instruction, instructionX, instructionY, paint);
+                instructionY += lineSpacing;
+            }
+            
+            // Draw pulsing "Tap to Start" at the bottom
+            paint.setTextAlign(Paint.Align.CENTER);
+            paint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
+            paint.setTextSize(fontSize);
+            float alpha = (float) Math.abs(Math.sin(System.currentTimeMillis() / 500.0));
+            paint.setColor(Color.argb((int)(255 * alpha), 255, 255, 255));
+            canvas.drawText("TAP ANYWHERE TO START!", getWidth()/2, boxMargin + boxHeight - 50, paint);
+            
+            // Reset paint properties
+            paint.setColor(Color.WHITE);
+            paint.setTypeface(Typeface.DEFAULT);
+            paint.setTextAlign(Paint.Align.LEFT);
+            return; // Don't draw other UI elements while showing instructions
         }
         
-        // Draw critical instructions with extra emphasis
-        y += 20; // Add some spacing
-        paint.setColor(Color.RED);
+        // Regular UI drawing code
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(Color.WHITE);
+        paint.setTextAlign(Paint.Align.LEFT);
         paint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
         
-        for (String criticalInstruction : criticalInstructions) {
-            canvas.drawText(criticalInstruction, width/2, y, paint);
-            y += 50;
+        // CPU Usage
+        paint.setTextSize(headerFontSize);
+        canvas.drawText("CPU Usage:", cpuBarBg.left, cpuBarBg.top - 15, paint);
+        paint.setTextSize(fontSize);
+        int cpuPercentage = (int)((float)processManager.getUsedCPU() / processManager.getTotalCPU() * 100);
+        canvas.drawText(cpuPercentage + "%", cpuBarBg.right + 20, cpuBarBg.top + cpuBarBg.height()/2 + fontSize/3, paint);
+        
+        // Memory Usage
+        paint.setTextSize(headerFontSize);
+        canvas.drawText("Memory Usage:", memoryBarBg.left, memoryBarBg.top - 15, paint);
+        paint.setTextSize(fontSize);
+        int memoryPercentage = (int)((float)processManager.getUsedMemory() / processManager.getTotalMemory() * 100);
+        canvas.drawText(memoryPercentage + "%", memoryBarBg.right + 20, memoryBarBg.top + memoryBarBg.height()/2 + fontSize/3, paint);
+        
+        // Draw queue information
+        float queueInfoY = memoryBarBg.bottom + 100;
+        paint.setTextSize(headerFontSize);
+        paint.setTextAlign(Paint.Align.CENTER);
+        int screenWidth = getWidth();
+        
+        // Running Queue
+        drawQueueInfo(canvas, runningQueueArea, "Running Queue", processManager.getRunningQueueSize(), 3, Color.rgb(60, 180, 60));
+        
+        // Ready Queue
+        drawQueueInfo(canvas, readyQueueArea, "Ready Queue", processManager.getReadyQueueSize(), 5, Color.rgb(60, 60, 180));
+        
+        // Blocked Queue
+        drawQueueInfo(canvas, blockedQueueArea, "Blocked Queue", processManager.getBlockedQueueSize(), 4, Color.rgb(180, 60, 60));
+        
+        // Reset color
+        paint.setColor(Color.WHITE);
+        
+        // Draw score and stats
+        paint.setTextSize(fontSize);
+        float statsY = queueInfoY + 60;
+        canvas.drawText("Score: " + processManager.getScore(), screenWidth/2, statsY, paint);
+        statsY += fontSize + 10;
+        canvas.drawText("Processes: " + processManager.getProcessesCompleted(), screenWidth/2, statsY, paint);
+        
+        // Draw emergency warning if active
+        if (processManager.isEmergencyEvent()) {
+            drawCriticalWarning(canvas);
         }
-        
-        // Tap to continue
-        paint.setColor(Color.CYAN);
-        paint.setTextSize(40);
-        canvas.drawText("TAP ANYWHERE TO START GAME", width/2, height - 100, paint);
-        
-        // Reset text properties
-        paint.setTypeface(Typeface.DEFAULT);
-        paint.setTextAlign(Paint.Align.LEFT);
     }
     
     @Override
     public boolean onTouchEvent(MotionEvent event) {
-        if (event.getAction() == MotionEvent.ACTION_DOWN) {
-            float touchX = event.getX();
-            float touchY = event.getY();
-            
-            // If instructions are shown, dismiss them on touch
-            if (showInstructions) {
+        // Handle instruction screen touch first
+        if (showInstructions && event.getAction() == MotionEvent.ACTION_DOWN) {
                 showInstructions = false;
                 gamePausedForInstructions = false;
                 return true;
             }
             
-            // If game is over, ignore touches
-            if (processManager.isGameOver()) {
+        if (processManager.isGameOver() || gamePausedForInstructions) {
                 return true;
             }
             
-            // Check if a button was pressed (if process is selected)
-            if (processManager.getSelectedProcess() != null) {
-                if (terminateButton.contains(touchX, touchY)) {
-                    processManager.terminateProcess(processManager.getSelectedProcess());
-                    processManager.selectProcess(null);
-                    return true;
-                } else if (priorityUpButton.contains(touchX, touchY)) {
-                    processManager.increasePriority(processManager.getSelectedProcess());
-                    return true;
-                } else if (priorityDownButton.contains(touchX, touchY)) {
-                    processManager.decreasePriority(processManager.getSelectedProcess());
-                    return true;
-                } else if (unblockButton.contains(touchX, touchY)) {
-                    processManager.unblockProcess(processManager.getSelectedProcess());
-                    return true;
-                }
-            }
-            
-            // Check if a process was tapped
-            Process touchedProcess = processManager.findProcessAtPosition(touchX, touchY);
-            if (touchedProcess != null) {
-                processManager.selectProcess(touchedProcess);
+        float touchX = event.getX();
+        float touchY = event.getY();
+        
+        switch (event.getAction()) {
+            case MotionEvent.ACTION_DOWN:
+                lastTouchX = touchX;
+                lastTouchY = touchY;
                 
-                // If this is a critical process and emergency is active, highlight unblock button
-                if (touchedProcess.getName().startsWith("CRITICAL") && processManager.isEmergencyEvent()) {
-                    // Visual feedback to help user know what to do
-                    paint.setColor(Color.YELLOW);
-                    paint.setStrokeWidth(8f);
-                    paint.setStyle(Paint.Style.STROKE);
-                    Canvas c = surfaceHolder.lockCanvas();
-                    if (c != null) {
-                        c.drawRect(unblockButton, paint);
-                        surfaceHolder.unlockCanvasAndPost(c);
-                    }
+                // Check if touching a process to start dragging
+                Process touchedProcess = processManager.findProcessAtPosition(touchX, touchY);
+                if (touchedProcess != null) {
+                    processManager.selectProcess(touchedProcess);
+                    touchedProcess.setDragging(true); // Set dragging on the process itself
+                    isDragging = true;
+                    return true;
                 }
-            } else {
+                
+                // If not touching a process or button, deselect
                 processManager.selectProcess(null);
-            }
-            return true;
+                isDragging = false;
+                break; // Important: break here if no action taken
+                
+            case MotionEvent.ACTION_MOVE:
+                if (isDragging && processManager.getSelectedProcess() != null) {
+                    Process draggedProcess = processManager.getSelectedProcess();
+                    // Update position directly while dragging
+                    draggedProcess.setPosition(touchX, touchY);
+                    lastTouchX = touchX;
+                    lastTouchY = touchY;
+                    return true;
+                }
+                break;
+                
+            case MotionEvent.ACTION_UP:
+                if (isDragging && processManager.getSelectedProcess() != null) {
+                    Process droppedProcess = processManager.getSelectedProcess();
+                    droppedProcess.setDragging(false); // Stop dragging state
+                    isDragging = false;
+                    
+                    // Check drop location and move process using ProcessManager
+                    if (runningQueueArea.contains(touchX, touchY)) {
+                        processManager.moveToRunningQueue(droppedProcess);
+                    } else if (readyQueueArea.contains(touchX, touchY)) {
+                        processManager.moveToReadyQueue(droppedProcess);
+                    } else if (blockedQueueArea.contains(touchX, touchY)) {
+                        processManager.moveToBlockedQueue(droppedProcess);
+                    } else {
+                        // Dropped outside a valid queue, reposition it based on its current state/queue
+                        processManager.repositionProcessBasedOnCurrentState(droppedProcess);
+                    }
+                    
+                    // Deselect after drop? Optional, but good practice
+                    // processManager.selectProcess(null);
+                    return true;
+                }
+                isDragging = false; // Ensure dragging flag is reset
+                break;
         }
         
-        return super.onTouchEvent(event);
+        return super.onTouchEvent(event); // Allow system handling if we didn't consume
     }
     
     public void pause() {
@@ -731,5 +808,11 @@ public class GameView extends SurfaceView implements SurfaceHolder.Callback, Run
         gameThread = new Thread(this);
         gameThread.start();
         lastUpdateTime = System.currentTimeMillis();
+    }
+
+    // Method for ProcessManager to get blink status (used in drawProcess)
+    public boolean shouldBlink() {
+        // Blink every half second
+        return (System.currentTimeMillis() / 500) % 2 == 0;
     }
 } 

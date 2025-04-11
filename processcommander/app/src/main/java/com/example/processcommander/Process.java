@@ -11,55 +11,55 @@ import java.util.UUID;
 public class Process {
     // Process states
     public enum State {
-        READY("Ready", Color.YELLOW),
-        RUNNING("Running", Color.GREEN),
-        BLOCKED("Blocked", Color.RED),
-        TERMINATED("Terminated", Color.GRAY),
-        CRITICAL("CRITICAL", Color.rgb(255, 50, 50));  // Brighter red for critical processes
-
-        private final String label;
-        private final int color;
-
-        State(String label, int color) {
+        NEW("New"),
+        READY("Ready"),
+        RUNNING("Running"),
+        BLOCKED("Blocked"),
+        TERMINATED("Terminated");
+        
+        private String label;
+        
+        State(String label) {
             this.label = label;
-            this.color = color;
         }
-
+        
         public String getLabel() {
             return label;
-        }
-
-        public int getColor() {
-            return color;
         }
     }
 
     // Process attributes
     private final String id;
-    private final String name;
+    private String name;
     private State state;
     private int priority;            // 1-10, higher means more important
-    private int cpuBurstTime;        // Time needed to complete
-    private int cpuTimeRemaining;    // Time left to complete
+    private long cpuBurstTime;        // Time needed to complete
+    private long cpuTimeRemaining;    // Time left to complete
     private int memoryRequired;      // Memory needed by the process
     private long creationTime;       // When the process was created
     private float x, y;              // Position on screen
     private float targetX, targetY;  // Target position for animations
     private RectF bounds;            // Bounds for touch detection
     private boolean selected;        // Whether this process is selected by user
+    private boolean isCritical;
+    private boolean hasInterrupt;
+    private boolean isIOCompleted;   // Added field for I/O completion status
+    private String interruptReason;
+    private float size;              // Size of the process visual representation
+    private boolean dragging;        // Added field
+    private boolean ioCompleted;     // Added field for I/O completion status
 
     // Visual properties
-    private static final float PROCESS_SIZE = 220f;
-    private static final float TEXT_SIZE = 30f;
+    private static final float DEFAULT_PROCESS_SIZE = 120f;
+    private static final float TEXT_SIZE = 24f;
 
     private float animationTime = 0f;  // Time variable for animations
-    private boolean isCritical = false; // Flag for critical processes
     private float pulseScale = 1.0f;   // Scale factor for pulsing effect
 
-    public Process(String name, int priority, int cpuBurstTime, int memoryRequired) {
+    public Process(String name, int priority, long cpuBurstTime, int memoryRequired) {
         this.id = UUID.randomUUID().toString();
         this.name = name;
-        this.state = State.READY;
+        this.state = State.NEW;
         this.priority = priority;
         this.cpuBurstTime = cpuBurstTime;
         this.cpuTimeRemaining = cpuBurstTime;
@@ -67,12 +67,13 @@ public class Process {
         this.creationTime = System.currentTimeMillis();
         this.bounds = new RectF();
         this.selected = false;
-        
-        // Check if this is a critical process
-        this.isCritical = name.startsWith("CRITICAL") || name.startsWith("WARNING");
-        if (this.isCritical && name.startsWith("CRITICAL")) {
-            this.state = State.CRITICAL; // Use special state for critical processes
-        }
+        this.isCritical = name.startsWith("CRITICAL-");
+        this.hasInterrupt = false;
+        this.isIOCompleted = false;
+        this.interruptReason = "";
+        this.size = DEFAULT_PROCESS_SIZE;
+        this.dragging = false; // Initialize dragging state
+        this.ioCompleted = false; // Initialize ioCompleted state
     }
 
     public void update(float deltaTime) {
@@ -82,15 +83,15 @@ public class Process {
         y += (targetY - y) * speedFactor;
         
         // Update bounds for touch detection
-        bounds.set(x - PROCESS_SIZE/2, y - PROCESS_SIZE/2, 
-                  x + PROCESS_SIZE/2, y + PROCESS_SIZE/2);
+        bounds.set(x - size/2, y - size/2, x + size/2, y + size/2);
                   
         // If process is running, decrease remaining time
         if (state == State.RUNNING) {
-            cpuTimeRemaining -= (deltaTime * 1000); // Convert seconds to milliseconds
-            if (cpuTimeRemaining <= 0) {
-                cpuTimeRemaining = 0;
-                state = State.TERMINATED;
+            cpuTimeRemaining -= deltaTime * 1000; // Convert to milliseconds
+            
+            // Random chance to generate interrupt
+            if (!hasInterrupt && !isCritical && Math.random() < 0.02 * deltaTime) { // 2% chance per second
+                generateInterrupt();
             }
         }
         
@@ -106,102 +107,121 @@ public class Process {
         }
     }
 
-    public void draw(Canvas canvas, Paint paint) {
-        // Calculate effective size with pulse
-        float effectiveSize = PROCESS_SIZE * pulseScale;
-        
-        // Draw process icon (circle with different colors based on state)
-        paint.setColor(state.getColor());
-        paint.setStyle(Paint.Style.FILL);
-        canvas.drawCircle(x, y, effectiveSize/2, paint);
-        
-        // Draw border (thicker if selected or critical)
-        paint.setStyle(Paint.Style.STROKE);
-        if (isCritical) {
-            // Draw attention-grabbing border for critical processes
-            paint.setColor(Color.WHITE);
-            paint.setStrokeWidth(selected ? 14f : 8f);
-            canvas.drawCircle(x, y, effectiveSize/2, paint);
-            
-            // Draw second border with blinking effect for critical processes
-            if ((int)(animationTime * 2) % 2 == 0) {
-                paint.setColor(Color.YELLOW);
+    private void generateInterrupt() {
+        hasInterrupt = true;
+        String[] interruptTypes = {
+            "I/O Request",
+            "Network Access",
+            "Disk Operation",
+            "User Input",
+            "Device Signal"
+        };
+        interruptReason = interruptTypes[(int)(Math.random() * interruptTypes.length)];
+        state = State.BLOCKED;
+    }
+
+    public void draw(Canvas canvas, Paint paint, GameView gameView) {
+        // Determine visual properties based on state, selection, etc.
+        int color = getColorForState();
+        int alpha = 255;
+        Paint.Style style = Paint.Style.FILL;
+        float strokeWidth = 4f;
+        boolean isBlinking = false;
+
+        // Blinking logic for blocked processes with completed I/O
+        if (state == State.BLOCKED && isIOCompleted) {
+            if (gameView.shouldBlink()) {
+                alpha = 100; // Dim when blinking off
+                isBlinking = true;
             } else {
-                paint.setColor(Color.RED);
+                alpha = 255; // Full opacity when blinking on
             }
-            paint.setStrokeWidth(4f);
-            canvas.drawCircle(x, y, effectiveSize/2 + 10, paint);
+        }
+        
+        // Process background
+        paint.setColor(color);
+        paint.setAlpha(alpha); 
+        paint.setStyle(style);
+        RectF bounds = getBounds();
+        float cornerRadius = 15f;
+        canvas.drawRoundRect(bounds, cornerRadius, cornerRadius, paint);
+
+        // Border (thicker if selected or critical)
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setAlpha(255); // Border always full opacity
+        if (selected) {
+            paint.setColor(Color.YELLOW);
+            paint.setStrokeWidth(strokeWidth * 1.5f);
+        } else if (name.startsWith("CRITICAL")) {
+            paint.setColor(Color.RED);
+            paint.setStrokeWidth(strokeWidth * 1.5f);
         } else {
             paint.setColor(Color.WHITE);
-            paint.setStrokeWidth(selected ? 12f : 6f);
-            canvas.drawCircle(x, y, effectiveSize/2, paint);
+            paint.setStrokeWidth(strokeWidth);
         }
-        
-        // Draw process name
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(Color.WHITE);
-        paint.setTextSize(TEXT_SIZE);
-        paint.setTextAlign(Paint.Align.CENTER);
-        paint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
-        canvas.drawText(name, x, y - 30, paint);
-        
-        // Draw process state
-        if (isCritical) {
-            // Make critical state text more noticeable
-            paint.setColor(Color.YELLOW);
-            paint.setTextSize(TEXT_SIZE * 1.2f);
-            paint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
-            canvas.drawText("CRITICAL - UNBLOCK NOW!", x, y + 10, paint);
+        canvas.drawRoundRect(bounds, cornerRadius, cornerRadius, paint);
+
+        // Text color (adjust for blinking)
+        if (isBlinking && alpha < 200) {
+            paint.setColor(Color.LTGRAY); // Dim text when background is dim
+        } else if (name.startsWith("CRITICAL")) {
+            paint.setColor(Color.RED); // Critical text is red
         } else {
-            canvas.drawText(state.getLabel(), x, y + 10, paint);
+            paint.setColor(Color.WHITE);
         }
+        paint.setAlpha(255); // Text always full opacity relative to its color
+        paint.setStyle(Paint.Style.FILL);
+        paint.setTextAlign(Paint.Align.CENTER);
         
-        // Reset to normal text
+        // Draw Process Name (adjust size)
+        float nameTextSize = size * 0.18f;
+        paint.setTextSize(nameTextSize);
+        paint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
+        canvas.drawText(name, x, y - nameTextSize * 0.5f, paint);
+
+        // Draw Priority and State (adjust size)
+        float infoTextSize = size * 0.15f;
+        paint.setTextSize(infoTextSize);
         paint.setTypeface(Typeface.DEFAULT);
-        paint.setTextSize(TEXT_SIZE);
-        paint.setColor(Color.WHITE);
-        
-        // Draw priority
-        canvas.drawText("Priority: " + priority, x, y + 50, paint);
-        
-        // Draw progress indicator for running processes
-        if (state == State.RUNNING) {
-            float progress = (float) cpuTimeRemaining / cpuBurstTime;
-            float progressWidth = PROCESS_SIZE * 0.8f;
-            float progressHeight = 16f;
-            
-            RectF progressBg = new RectF(
-                x - progressWidth/2, 
-                y + 70,
-                x + progressWidth/2, 
-                y + 70 + progressHeight
-            );
-            
-            // Background
-            paint.setColor(Color.DKGRAY);
-            canvas.drawRect(progressBg, paint);
-            
-            // Progress
-            paint.setColor(Color.GREEN);
-            RectF progressFg = new RectF(progressBg);
-            progressFg.right = progressFg.left + progressFg.width() * progress;
-            canvas.drawRect(progressFg, paint);
+        String stateLabel = (state == State.BLOCKED && isIOCompleted) ? "IO Done!" : state.getLabel(); // Show IO Done state
+        canvas.drawText("P:" + priority + " | " + stateLabel, x, y + infoTextSize * 1.2f, paint);
+
+        // Draw Interrupt Reason if any
+        if (hasInterrupt && !interruptReason.isEmpty()) {
+             paint.setColor(Color.YELLOW);
+             paint.setTextSize(infoTextSize * 0.9f);
+             canvas.drawText(interruptReason, x, y + infoTextSize * 2.4f, paint);
         }
         
-        // Draw memory info 
-        if (state != State.TERMINATED) {
-            paint.setTextSize(TEXT_SIZE * 0.9f);
-            canvas.drawText("Mem: " + memoryRequired + "MB", x, y + 110, paint);
+        // Reset paint defaults
+        paint.setColor(Color.WHITE);
+        paint.setAlpha(255);
+        paint.setTextAlign(Paint.Align.LEFT);
+        paint.setTypeface(Typeface.DEFAULT);
+        paint.setStrokeWidth(1f);
+    }
+
+    private int getColorForState() {
+        switch (state) {
+            case NEW:
+                return Color.GRAY;
+            case RUNNING:
+                return Color.GREEN;
+            case READY:
+                return Color.BLUE;
+            case BLOCKED:
+                 return (isIOCompleted) ? Color.CYAN : Color.MAGENTA; // Cyan if IO Done, Magenta otherwise
+            case TERMINATED:
+                return Color.DKGRAY;
+            default:
+                return Color.WHITE;
         }
     }
 
     public void setPosition(float x, float y) {
         this.x = x;
         this.y = y;
-        this.targetX = x;
-        this.targetY = y;
-        this.bounds.set(x - PROCESS_SIZE/2, y - PROCESS_SIZE/2, 
-                       x + PROCESS_SIZE/2, y + PROCESS_SIZE/2);
+        updateBounds();
     }
 
     public void setTargetPosition(float x, float y) {
@@ -227,12 +247,7 @@ public class Process {
     }
 
     public void setState(State state) {
-        // For critical processes, maintain visual style when being unblocked
-        if (this.isCritical && state == State.READY) {
-            this.state = State.RUNNING;
-        } else {
-            this.state = state;
-        }
+        this.state = state;
     }
 
     public int getPriority() {
@@ -240,14 +255,14 @@ public class Process {
     }
 
     public void setPriority(int priority) {
-        this.priority = Math.max(1, Math.min(10, priority)); // Clamp between 1-10
+        this.priority = Math.max(1, Math.min(5, priority));
     }
 
-    public int getCpuBurstTime() {
+    public long getCpuBurstTime() {
         return cpuBurstTime;
     }
 
-    public int getCpuTimeRemaining() {
+    public long getCpuTimeRemaining() {
         return cpuTimeRemaining;
     }
 
@@ -277,5 +292,59 @@ public class Process {
 
     public float getY() {
         return y;
+    }
+
+    public boolean isCritical() {
+        return isCritical;
+    }
+
+    public boolean isInterrupted() {
+        return hasInterrupt;
+    }
+
+    public void clearInterrupt() {
+        hasInterrupt = false;
+        interruptReason = "";
+    }
+
+    public boolean isIOCompleted() {
+        return isIOCompleted;
+    }
+
+    public void setIOCompleted(boolean completed) {
+        this.isIOCompleted = completed;
+    }
+
+    public void setSize(float size) {
+        this.size = size;
+        // Update bounds when size changes
+        updateBounds();
+    }
+
+    public float getSize() {
+        return size;
+    }
+
+    public void setInterrupted(boolean interrupted) {
+        this.hasInterrupt = interrupted;
+        if (interrupted) {
+            this.state = State.BLOCKED;
+        }
+    }
+
+    private void updateBounds() {
+        bounds.set(x - size/2, y - size/2, x + size/2, y + size/2);
+    }
+
+    public boolean isDragging() {
+        return dragging;
+    }
+
+    public void setDragging(boolean dragging) {
+        this.dragging = dragging;
+    }
+
+    private RectF getBounds() {
+        return bounds;
     }
 } 

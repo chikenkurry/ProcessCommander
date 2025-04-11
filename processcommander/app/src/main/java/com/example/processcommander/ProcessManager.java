@@ -10,6 +10,8 @@ import android.view.Display;
 import android.view.WindowManager;
 import android.graphics.Point;
 import android.content.SharedPreferences;
+import android.graphics.RectF;
+import android.graphics.PointF;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -20,17 +22,26 @@ import java.util.Random;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class ProcessManager {
     // Constants
     private static final int MAX_PROCESSES = 15;
-    private static final int MAX_RUNNING_PROCESSES = 2;
+    private static final int MAX_RUNNING_PROCESSES = 4;
+    private static final int RUNNING_QUEUE_SIZE = 3;
+    private static final int READY_QUEUE_SIZE = 5;
+    private static final int BLOCKED_QUEUE_SIZE = 4;
     private static final long PROCESS_GEN_INTERVAL_MS = 5000; // Time between new process generation
     private static final String[] PROCESS_NAMES = {
             "Browser", "FileSystem", "Network", "Audio", "Video", 
             "SystemUI", "Kernel", "Memory", "Update", "Security", 
             "Backup", "Search", "Sync", "Bluetooth", "Wifi"
     };
+    
+    // Android context and system services
+    private Context context;
+    private Random random;
+    private Vibrator vibrator;
     
     // Difficulty settings
     private static final String PREFS_NAME = "ProcessCommanderPrefs";
@@ -63,13 +74,16 @@ public class ProcessManager {
     private static final int MARGIN_TOP = 200; // Space at top for UI elements
     private static final int MARGIN_BOTTOM = 250; // Space at bottom for buttons
     
-    // Lists and collections
-    private CopyOnWriteArrayList<Process> processes;
-    private List<Process> runningProcesses;
+    // Process queues
+    private CopyOnWriteArrayList<Process> newProcesses; // New list for processes with no state
+    private CopyOnWriteArrayList<Process> runningQueue;
+    private CopyOnWriteArrayList<Process> readyQueue;
+    private CopyOnWriteArrayList<Process> blockedQueue;
     private Process selectedProcess;
-    private Random random;
-    private Vibrator vibrator;
-    private Context context;
+
+    // Starvation prevention
+    private static final long STARVATION_THRESHOLD_MS = 30000; // 30 seconds
+    private ConcurrentHashMap<Process, Long> processWaitTimes;
     
     // Flags and state
     private boolean emergencyEvent = false;
@@ -80,19 +94,36 @@ public class ProcessManager {
     private int processesCompleted = 0;
     private int emergencyEventsHandled = 0;
     private boolean gameOver = false;
+    private String gameOverReason = ""; // Add field to store reason
     private static final int CRITICAL_GRACE_PERIOD = 5; // Grace period in seconds before critical processes can have penalties
     
     // Threading
     private ExecutorService threadPool;
     private volatile boolean isRunning = true;
     
+    // Priority system
+    private int nextProcessPriority = 10; // Start with highest priority
+    private boolean initialPriorityPhase = true; // Track if we're still in the initial 1-10 phase
+    
+    // References to GameView's queue areas (need to be set)
+    private RectF newProcessAreaRef;
+    private RectF runningQueueAreaRef;
+    private RectF readyQueueAreaRef;
+    private RectF blockedQueueAreaRef;
+    
+    private static final int SLOTS_PER_ROW = 3; 
+    private static final float SLOT_SPACING = 15f;
+    
     public ProcessManager(Context context) {
         this.context = context;
-        this.processes = new CopyOnWriteArrayList<>();
-        this.runningProcesses = new ArrayList<>();
+        this.newProcesses = new CopyOnWriteArrayList<>(); // Initialize new list
+        this.runningQueue = new CopyOnWriteArrayList<>();
+        this.readyQueue = new CopyOnWriteArrayList<>();
+        this.blockedQueue = new CopyOnWriteArrayList<>();
+        this.processWaitTimes = new ConcurrentHashMap<>();
         this.random = new Random();
         this.vibrator = (Vibrator) context.getSystemService(Context.VIBRATOR_SERVICE);
-        this.threadPool = Executors.newFixedThreadPool(3); // 3 threads for background tasks
+        this.threadPool = Executors.newFixedThreadPool(3);
         
         // Track game start time for difficulty progression
         this.gameStartTime = System.currentTimeMillis();
@@ -113,6 +144,9 @@ public class ProcessManager {
         
         // Start the emergency event generator thread
         startEmergencyEventThread();
+        
+        // Start the starvation checker thread
+        startStarvationCheckerThread();
     }
     
     private void loadDifficultySettings() {
@@ -163,7 +197,7 @@ public class ProcessManager {
                         }
                         
                         Thread.sleep(interval);
-                        if (processes.size() < maxProcessesByDifficulty && !gameOver) {
+                        if (newProcesses.size() + runningQueue.size() + readyQueue.size() + blockedQueue.size() < maxProcessesByDifficulty && !gameOver) {
                             generateNewProcess();
                         }
                     } catch (InterruptedException e) {
@@ -202,154 +236,169 @@ public class ProcessManager {
         });
     }
     
-    private void generateNewProcess() {
-        // Don't generate if we're already at capacity
-        // Capacity increases slightly as game progresses in easy mode
-        int currentMaxProcesses = maxProcessesByDifficulty;
-        if (difficultyLevel == 0) {
-            // In easy mode, gradually increase the max processes cap over time
-            float minutesElapsed = (System.currentTimeMillis() - gameStartTime) / 60000f;
-            if (minutesElapsed > 5) {
-                currentMaxProcesses += Math.min(4, (int)(minutesElapsed / 5)); // +1 every 5 minutes, up to +4
-            }
-        }
-        
-        if (processes.size() >= currentMaxProcesses) {
-            return;
-        }
-        
-        // Generate random process attributes based on difficulty and progression
-        String name = PROCESS_NAMES[random.nextInt(PROCESS_NAMES.length)] + "-" + random.nextInt(100);
-        
-        // Adjust priorities based on difficulty and game progression
-        int priority;
-        if (difficultyLevel == 0) { // Easy
-            float minutesElapsed = (System.currentTimeMillis() - gameStartTime) / 60000f;
-            if (minutesElapsed < 3) {
-                priority = random.nextInt(3) + 1; // 1-3 priority (very easy start)
-            } else if (minutesElapsed < 8) {
-                priority = random.nextInt(4) + 1; // 1-4 priority
-            } else {
-                priority = random.nextInt(5) + 1; // 1-5 priority (normal easy)
-            }
-        } else if (difficultyLevel == 2) { // Hard
-            float minutesElapsed = (System.currentTimeMillis() - gameStartTime) / 60000f;
-            if (minutesElapsed < 2) {
-                priority = random.nextInt(6) + 1; // 1-6 priority (easier start)
-            } else if (minutesElapsed < 5) {
-                priority = random.nextInt(7) + 2; // 2-8 priority
-            } else {
-                priority = random.nextInt(6) + 3; // 3-8 priority (gradually harder)
-            }
-        } else { // Medium
-            priority = random.nextInt(8) + 1; // 1-8 priority
-        }
-        
-        // Adjust burst times based on difficulty
-        int cpuBurstTime;
-        if (difficultyLevel == 0) { // Easy
-            float minutesElapsed = (System.currentTimeMillis() - gameStartTime) / 60000f;
-            if (minutesElapsed < 5) {
-                cpuBurstTime = (random.nextInt(6) + 7) * 1000; // 7-12 seconds (very easy start)
-            } else {
-                cpuBurstTime = (random.nextInt(6) + 5) * 1000; // 5-10 seconds (normal)
-            }
-        } else if (difficultyLevel == 2) { // Hard
-            float minutesElapsed = (System.currentTimeMillis() - gameStartTime) / 60000f;
-            if (minutesElapsed < 3) {
-                cpuBurstTime = (random.nextInt(5) + 4) * 1000; // 4-8 seconds (easier start)
-            } else {
-                cpuBurstTime = (random.nextInt(5) + 3) * 1000; // 3-7 seconds
-            }
-        } else { // Medium
-            cpuBurstTime = (random.nextInt(8) + 3) * 1000; // 3-10 seconds
-        }
-        
-        // Adjust memory requirements based on difficulty
-        int memoryRequired;
-        if (difficultyLevel == 0) { // Easy
-            float minutesElapsed = (System.currentTimeMillis() - gameStartTime) / 60000f;
-            if (minutesElapsed < 5) {
-                memoryRequired = (random.nextInt(80) + 40); // 40-120 MB (easier start)
-            } else {
-                memoryRequired = (random.nextInt(100) + 50); // 50-150 MB (normal)
-            }
-        } else if (difficultyLevel == 2) { // Hard
-            float minutesElapsed = (System.currentTimeMillis() - gameStartTime) / 60000f;
-            if (minutesElapsed < 3) {
-                memoryRequired = (random.nextInt(100) + 70); // 70-170 MB (easier start)
-            } else {
-                memoryRequired = (random.nextInt(150) + 100); // 100-250 MB
-            }
-        } else { // Medium
-            memoryRequired = (random.nextInt(150) + 75); // 75-225 MB
-        }
-        
-        // Create and add the process
-        Process process = new Process(name, priority, cpuBurstTime, memoryRequired);
-        
-        // Position the process on the screen using a grid-like pattern
-        positionNewProcess(process);
-        
-        // Add to processes list
-        processes.add(process);
-    }
-    
-    private void positionNewProcess(Process process) {
-        // Calculate available area for processes
-        int availableWidth = screenWidth - 200; // 100px margin on each side
-        int availableHeight = screenHeight - MARGIN_TOP - MARGIN_BOTTOM;
-        
-        // Use a grid-like approach for positioning
-        int gridCols = 4; // Number of columns in the grid
-        int gridRows = 4; // Number of rows in the grid
-        
-        int colWidth = availableWidth / gridCols;
-        int rowHeight = availableHeight / gridRows;
-        
-        // Try to find an empty cell first
-        boolean foundEmptyCell = false;
-        
-        // Create a 2D grid to track occupied cells
-        boolean[][] occupiedCells = new boolean[gridRows][gridCols];
-        
-        // Mark cells as occupied based on existing processes
-        for (Process p : processes) {
-            int col = (int)((p.getX() - 100) / colWidth);
-            int row = (int)((p.getY() - MARGIN_TOP) / rowHeight);
-            
-            // Check if within valid grid range
-            if (col >= 0 && col < gridCols && row >= 0 && row < gridRows) {
-                occupiedCells[row][col] = true;
-            }
-        }
-        
-        // Try to find an empty cell
-        for (int row = 0; row < gridRows; row++) {
-            for (int col = 0; col < gridCols; col++) {
-                if (!occupiedCells[row][col]) {
-                    // Found an empty cell
-                    float x = 100 + col * colWidth + colWidth / 2;
-                    float y = MARGIN_TOP + row * rowHeight + rowHeight / 2;
-                    
-                    // Add some randomness to avoid perfect grid alignment
-                    x += (random.nextFloat() - 0.5f) * colWidth * 0.5f;
-                    y += (random.nextFloat() - 0.5f) * rowHeight * 0.5f;
-                    
-                    process.setPosition(x, y);
-                    foundEmptyCell = true;
-                    break;
+    private void startStarvationCheckerThread() {
+        threadPool.execute(new Runnable() {
+            @Override
+            public void run() {
+                while (isRunning) {
+                    try {
+                        Thread.sleep(1000); // Check every second
+                        checkForStarvation();
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
                 }
             }
-            if (foundEmptyCell) break;
+        });
+    }
+    
+    private void checkForStarvation() {
+        long currentTime = System.currentTimeMillis();
+        
+        // Check ready queue for starvation
+        for (Process process : readyQueue) {
+            Long waitStartTime = processWaitTimes.get(process);
+            if (waitStartTime != null && currentTime - waitStartTime > STARVATION_THRESHOLD_MS) {
+                // Process is starving, force it into running queue if possible
+                if (process.getPriority() < 5) {
+                    process.setPriority(process.getPriority() + 1); // Increase priority
+                }
+                
+                if (runningQueue.size() < RUNNING_QUEUE_SIZE) {
+                    moveToRunningQueue(process);
+                } else if (!process.getName().startsWith("CRITICAL")) {
+                    // If not critical, penalize the player
+                    score = Math.max(0, score - 200);
+                    if (vibrator != null && vibrator.hasVibrator()) {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            vibrator.vibrate(VibrationEffect.createOneShot(500, VibrationEffect.DEFAULT_AMPLITUDE));
+            } else {
+                            vibrator.vibrate(500);
+                        }
+                    }
+            } else {
+                    // Critical process is starving
+                    criticalPenaltyCount++;
+                    applyPenalty();
+                }
+            }
+        }
+    }
+    
+    public void moveToRunningQueue(Process process) {
+        if (process == null || runningQueue.size() >= RUNNING_QUEUE_SIZE) return;
+        removeProcessFromAllQueues(process);
+        if (!runningQueue.contains(process)) {
+            runningQueue.add(process);
+            process.setState(Process.State.RUNNING);
+            processWaitTimes.remove(process);
+            repositionAllProcesses(); // Reposition ALL after move
+        }
+    }
+
+    public void moveToReadyQueue(Process process) {
+        if (process == null || readyQueue.size() >= READY_QUEUE_SIZE) return;
+        removeProcessFromAllQueues(process);
+        if (!readyQueue.contains(process)) {
+            readyQueue.add(process);
+            process.setState(Process.State.READY);
+            processWaitTimes.putIfAbsent(process, System.currentTimeMillis());
+            repositionAllProcesses(); // Reposition ALL after move
+        }
+    }
+
+    public void moveToBlockedQueue(Process process) {
+        if (process == null || blockedQueue.size() >= BLOCKED_QUEUE_SIZE) return;
+        removeProcessFromAllQueues(process);
+        if (!blockedQueue.contains(process)) {
+            blockedQueue.add(process);
+            process.setState(Process.State.BLOCKED);
+            processWaitTimes.remove(process);
+            repositionAllProcesses(); // Reposition ALL after move
+        }
+    }
+    
+    private void removeProcessFromAllQueues(Process process) {
+        newProcesses.remove(process);
+        runningQueue.remove(process);
+        readyQueue.remove(process);
+        blockedQueue.remove(process);
+    }
+    
+    public void repositionAllProcesses() {
+        repositionProcessesInList(newProcesses, newProcessAreaRef, Process.State.NEW, MAX_PROCESSES); // Use MAX_PROCESSES for new area capacity
+        repositionProcessesInList(runningQueue, runningQueueAreaRef, Process.State.RUNNING, RUNNING_QUEUE_SIZE);
+        repositionProcessesInList(readyQueue, readyQueueAreaRef, Process.State.READY, READY_QUEUE_SIZE);
+        repositionProcessesInList(blockedQueue, blockedQueueAreaRef, Process.State.BLOCKED, BLOCKED_QUEUE_SIZE);
+    }
+    
+    private void repositionProcessesInList(List<Process> processList, RectF area, Process.State state, int queueCapacity) {
+        if (area == null) return; // Don't reposition if the area reference isn't set yet
+        for (int i = 0; i < processList.size(); i++) {
+            Process process = processList.get(i);
+            // Calculate target slot position based on index 'i'
+            PointF targetPos = calculateSlotPosition(i, area, queueCapacity);
+            process.setPosition(targetPos.x, targetPos.y); // Snap immediately for now
+            process.setTargetPosition(targetPos.x, targetPos.y);
+            process.setDragging(false); // Ensure not dragging
+        }
+    }
+
+    private PointF calculateSlotPosition(int slotIndex, RectF area, int queueCapacity) {
+        if (area == null) {
+            // Default position if area is not yet defined (e.g., during initialization)
+            return new PointF(screenWidth / 2, screenHeight / 2); 
         }
         
-        // If no empty cell was found, place randomly
-        if (!foundEmptyCell) {
-            float x = 100 + random.nextFloat() * availableWidth;
-            float y = MARGIN_TOP + random.nextFloat() * availableHeight;
-            process.setPosition(x, y);
-        }
+        // Use queueCapacity to determine layout, not maxSize directly if it differs (like for New area)
+        int maxSlots = queueCapacity;
+        int rowCount = (int) Math.ceil((double) maxSlots / SLOTS_PER_ROW);
+
+        float areaContentWidth = area.width() - 2 * SLOT_SPACING;
+        float areaContentHeight = area.height() - 90 - 2 * SLOT_SPACING; // Available height below title
+
+        float slotWidth = areaContentWidth / SLOTS_PER_ROW - SLOT_SPACING;
+        float slotHeight = areaContentHeight / rowCount - SLOT_SPACING;
+        slotHeight = Math.min(slotHeight, slotWidth * 1.2f); // Maintain aspect ratio
+
+        int targetRow = slotIndex / SLOTS_PER_ROW;
+        int targetCol = slotIndex % SLOTS_PER_ROW;
+
+        float slotLeft = area.left + SLOT_SPACING + targetCol * (slotWidth + SLOT_SPACING);
+        float slotTop = area.top + 90 + SLOT_SPACING + targetRow * (slotHeight + SLOT_SPACING);
+
+        // Calculate the center of the target slot
+        float targetX = slotLeft + slotWidth / 2;
+        float targetY = slotTop + slotHeight / 2;
+
+        return new PointF(targetX, targetY);
+    }
+    
+    private void generateNewProcess() {
+        String name = PROCESS_NAMES[random.nextInt(PROCESS_NAMES.length)];
+        
+        // Generate random priority between 1 and 10
+        int priority = random.nextInt(10) + 1;
+        
+        // Generate CPU burst time (in milliseconds)
+        long cpuBurstTime = (5 + random.nextInt(16)) * 1000; // 5-20 seconds
+        
+        // Generate memory requirement
+        int memoryRequired = 100 + random.nextInt(401); // 100-500 MB
+        
+        // Create new process with no state
+        Process newProcess = new Process(
+            name,
+            priority,
+            cpuBurstTime,
+            memoryRequired
+        );
+        
+        // Add to list FIRST
+        newProcesses.add(newProcess);
+        
+        // THEN reposition all to find its slot
+        repositionAllProcesses();
     }
     
     private void triggerEmergencyEvent() {
@@ -416,7 +465,7 @@ public class ProcessManager {
         emergencyProcess.setPosition(x, y);
         
         // Add to processes list
-        processes.add(emergencyProcess);
+        runningQueue.add(emergencyProcess);
     }
     
     public void update(float deltaTime) {
@@ -424,126 +473,90 @@ public class ProcessManager {
             return;
         }
         
-        // Update difficulty progression based on game time
+        // Update difficulty progression
         updateDifficultyProgression();
         
-        // Check emergency event timeout
-        if (emergencyEvent) {
-            long currentTime = System.currentTimeMillis();
-            long emergencyDuration = (currentTime - emergencyStartTime) / 1000; // Duration in seconds
-            
-            // If emergency has been active too long without being handled
-            // Only check for timeout if the grace period has passed
-            if (emergencyDuration > emergencyTimeoutSeconds && emergencyDuration > CRITICAL_GRACE_PERIOD) {
-                handleEmergencyTimeout();
-            }
-        }
-        
-        // Update all processes
-        for (Process process : processes) {
-            process.update(deltaTime);
-        }
-        
-        // Update system resources
-        updateResources();
-        
-        // Schedule processes
-        scheduleProcesses();
-        
-        // Remove terminated processes
-        Iterator<Process> iterator = processes.iterator();
+        // List to hold processes that completed in this frame
+        List<Process> completedProcesses = new ArrayList<>();
+
+        // List to hold processes that need to move from Blocked to Ready
+        List<Process> readyToUnblock = new ArrayList<>();
+
+        // Check for process interrupts & Update running processes
+        Iterator<Process> iterator = runningQueue.iterator();
         while (iterator.hasNext()) {
             Process process = iterator.next();
-            if (process.getState() == Process.State.TERMINATED) {
-                // Add score based on process completion (higher score for higher priority)
-                score += process.getPriority() * 10;
-                processesCompleted++;
-                
-                // Remove terminated process from running list
-                runningProcesses.remove(process);
-                
-                // Remove from processes list with a delay
-                new Thread(new Runnable() {
-                    @Override
-                    public void run() {
-                        try {
-                            Thread.sleep(1000); // Keep terminated process visible for 1 second
-                            processes.remove(process);
-                            
-                            // Clear selection if the terminated process was selected
-                            if (process == selectedProcess) {
-                                selectedProcess = null;
-                            }
-                        } catch (InterruptedException e) {
-                            Thread.currentThread().interrupt();
-                        }
-                    }
-                }).start();
-            }
-        }
-        
-        // Check if emergency has been handled
-        if (emergencyEvent) {
-            boolean criticalProcessesExist = false;
-            for (Process process : processes) {
-                if (process.getName().startsWith("CRITICAL-")) {
-                    criticalProcessesExist = true;
-                    
-                    // Check if the critical process is running (unblocked)
-                    if (process.getState() == Process.State.RUNNING) {
-                        // Emergency is being handled, add score
-                        emergencyEvent = false;
-                        emergencyEventsHandled++;
-                        score += 500; // Bonus for handling emergency
-                        
-                        // Reset critical penalty count when successfully handled
-                        criticalPenaltyCount = 0;
-                    } else if (process.getState() == Process.State.TERMINATED) {
-                        // Emergency was handled successfully
-                        emergencyEvent = false;
-                        emergencyEventsHandled++;
-                        score += 1000; // Bigger bonus for completing emergency
-                        
-                        // Reset critical penalty count when successfully handled
-                        criticalPenaltyCount = 0;
-                    }
-                }
+            
+            // Process Interrupts (Check first)
+            if (!process.isInterrupted() && random.nextFloat() < 0.05f * deltaTime) { // 5% chance per second
+                process.setInterrupted(true); // Mark as interrupted
+                // Don't move immediately, let state handling logic manage it
             }
             
-            // If all critical processes are gone and emergency is still active
-            if (!criticalProcessesExist && emergencyEvent) {
-                emergencyEvent = false;
-                
-                // Emergency disappeared without being handled (unlikely but possible)
-                // Still count this as a failure
-                criticalPenaltyCount++;
-                
-                // Apply penalty but don't end game on first miss
-                if (criticalPenaltyCount >= 3 || difficultyLevel > 0) {
-                    gameOver = true;
-                } else {
-                    score = Math.max(0, score - 500); // Penalty
+            // Update process logic (e.g., decrementing CPU time)
+            process.update(deltaTime); 
+            
+            // Check for completion AFTER updating
+            if (process.getState() == Process.State.RUNNING && process.getCpuTimeRemaining() <= 0) {
+                completedProcesses.add(process); // Add to list for later removal
+            }
+            
+            // Handle state changes (like moving interrupted processes)
+            if (process.isInterrupted() && process.getState() == Process.State.RUNNING) {
+                 // We could potentially move it to blocked queue here, 
+                 // but let's stick to user/button actions for moves for now.
+                 // The state is already set to BLOCKED inside process.setInterrupted(true)
+                 // We just need to ensure it stops consuming CPU etc.
+            }
+        }
+
+        // --- Process Completed Processes --- 
+        if (!completedProcesses.isEmpty()) {
+            for (Process completedProcess : completedProcesses) {
+                if (runningQueue.contains(completedProcess)) { // Check if still in running queue
+                    completedProcess.setState(Process.State.TERMINATED); // Mark as terminated
+                    runningQueue.remove(completedProcess); // Now remove it safely
+                    processesCompleted++;
+                    score += completedProcess.getPriority() * 100; 
+                    processWaitTimes.remove(completedProcess);
+                }
+            }
+            repositionAllProcesses(); // Reposition after handling completions
+        }
+        // --- End Processing Completions ---
+
+        // Randomly complete I/O for blocked processes & Check for auto-unblock
+        for (Process process : blockedQueue) {
+            // Ensure it's actually blocked due to an interrupt before randomly completing I/O
+            if (process.getState() == Process.State.BLOCKED && process.isInterrupted()) { 
+                 if (!process.isIOCompleted() && random.nextFloat() < 0.1f * deltaTime) { // 10% chance per second
+                    process.setIOCompleted(true); // Mark I/O as done
+                    // Automatically move to Ready queue now
+                    readyToUnblock.add(process);
                 }
             }
         }
         
-        // Check for game over condition
-        if ((usedCPU >= totalCPU || usedMemory >= totalMemory) && !gameOver) {
-            // In easy mode, give a grace period before game over
-            if (difficultyLevel == 0) {
-                // Automatically terminate some lower priority processes
-                sortAndTerminateLowPriorityProcesses();
-            } else {
-                gameOver = true;
+        // --- Auto-move processes from Blocked to Ready --- 
+        if (!readyToUnblock.isEmpty()) {
+            for (Process process : readyToUnblock) {
+                moveToReadyQueue(process); // This also calls repositionAllProcesses
             }
+            // No need to call repositionAllProcesses here, as moveToReadyQueue does it.
         }
+
+        // Update resources
+        updateResources();
+        
+        // Check for game over condition
+        checkGameOverCondition();
     }
     
     // Helper method for easy mode: automatically terminate low priority processes
     private void sortAndTerminateLowPriorityProcesses() {
         // Get all running processes
         List<Process> allRunning = new ArrayList<>();
-        for (Process p : processes) {
+        for (Process p : runningQueue) {
             if (p.getState() == Process.State.RUNNING) {
                 allRunning.add(p);
             }
@@ -562,7 +575,7 @@ public class ProcessManager {
         for (Process p : allRunning) {
             if (count < 2) {
                 p.setState(Process.State.TERMINATED);
-                runningProcesses.remove(p);
+                runningQueue.remove(p);
                 count++;
             } else {
                 break;
@@ -599,63 +612,63 @@ public class ProcessManager {
     }
     
     private void updateResources() {
-        // Calculate CPU usage based on running processes and their priorities
         usedCPU = 0;
-        for (Process process : runningProcesses) {
-            usedCPU += process.getPriority() * 10 * cpuUsageMultiplier * difficultyMultiplier;
+        usedMemory = 0;
+        
+        // Calculate for all processes including new ones
+        for (Process process : newProcesses) {
+            usedMemory += process.getMemoryRequired() * memoryUsageMultiplier * difficultyMultiplier * 0.3;
         }
         
-        // Calculate memory usage based on all non-terminated processes
-        usedMemory = 0;
-        for (Process process : processes) {
-            if (process.getState() != Process.State.TERMINATED) {
+        for (Process process : runningQueue) {
+            usedCPU += process.getPriority() * 10 * cpuUsageMultiplier * difficultyMultiplier;
                 usedMemory += process.getMemoryRequired() * memoryUsageMultiplier * difficultyMultiplier;
             }
+        
+        for (Process process : readyQueue) {
+            usedMemory += process.getMemoryRequired() * memoryUsageMultiplier * difficultyMultiplier * 0.5;
+        }
+        
+        for (Process process : blockedQueue) {
+            usedMemory += process.getMemoryRequired() * memoryUsageMultiplier * difficultyMultiplier * 0.3;
         }
     }
     
-    private void scheduleProcesses() {
-        // Limit number of running processes based on difficulty
-        if (runningProcesses.size() < maxRunningProcessesByDifficulty) {
-            // Sort processes by priority (highest first)
-            ArrayList<Process> readyProcesses = new ArrayList<>();
-            for (Process process : processes) {
-                if (process.getState() == Process.State.READY) {
-                    readyProcesses.add(process);
-                }
-            }
-            
-            if (!readyProcesses.isEmpty()) {
-                Collections.sort(readyProcesses, new Comparator<Process>() {
-                    @Override
-                    public int compare(Process p1, Process p2) {
-                        // Sort by priority (higher first)
-                        return Integer.compare(p2.getPriority(), p1.getPriority());
-                    }
-                });
-                
-                // Start the highest priority process
-                int canStart = maxRunningProcessesByDifficulty - runningProcesses.size();
-                for (int i = 0; i < Math.min(canStart, readyProcesses.size()); i++) {
-                    Process process = readyProcesses.get(i);
-                    process.setState(Process.State.RUNNING);
-                    runningProcesses.add(process);
-                }
-            }
+    public void draw(Canvas canvas, Paint paint, GameView gameView) {
+        // Draw all processes in their respective areas
+        for (Process process : newProcesses) {
+            process.draw(canvas, paint, gameView);
         }
-    }
-    
-    public void draw(Canvas canvas, Paint paint) {
-        // Draw all processes
-        for (Process process : processes) {
-            process.draw(canvas, paint);
+        for (Process process : runningQueue) {
+            process.draw(canvas, paint, gameView);
+        }
+        for (Process process : readyQueue) {
+            process.draw(canvas, paint, gameView);
+        }
+        for (Process process : blockedQueue) {
+            process.draw(canvas, paint, gameView);
         }
     }
     
     public Process findProcessAtPosition(float x, float y) {
-        // Iterate in reverse order to check top processes first
-        for (int i = processes.size() - 1; i >= 0; i--) {
-            Process process = processes.get(i);
+        // Check new processes first
+        for (Process process : newProcesses) {
+            if (process.contains(x, y)) {
+                return process;
+            }
+        }
+        // Then check other queues
+        for (Process process : runningQueue) {
+            if (process.contains(x, y)) {
+                return process;
+            }
+        }
+        for (Process process : readyQueue) {
+            if (process.contains(x, y)) {
+                return process;
+            }
+        }
+        for (Process process : blockedQueue) {
             if (process.contains(x, y)) {
                 return process;
             }
@@ -708,7 +721,17 @@ public class ProcessManager {
     
     public void terminateProcess(Process process) {
         if (process != null) {
-            process.setState(Process.State.TERMINATED);
+            removeProcessFromAllQueues(process); // Remove first
+            processWaitTimes.remove(process);
+            process.setState(Process.State.TERMINATED); // Mark as terminated (optional)
+            
+            // Penalty for terminating critical process
+            if (process.getName().startsWith("CRITICAL")) {
+                criticalPenaltyCount++;
+                applyPenalty();
+            }
+            
+            repositionAllProcesses(); // Reposition remaining processes
         }
     }
     
@@ -774,7 +797,7 @@ public class ProcessManager {
         
         // Increment the emergency's priority or create secondary emergencies
         boolean criticalFound = false;
-        for (Process process : processes) {
+        for (Process process : runningQueue) {
             if (process.getName().startsWith("CRITICAL-") && process.getState() == Process.State.BLOCKED) {
                 criticalFound = true;
                 
@@ -797,6 +820,10 @@ public class ProcessManager {
         }
         
         // Apply penalties based on how many times emergencies have been ignored
+        applyPenalty();
+    }
+    
+    private void applyPenalty() {
         if (criticalPenaltyCount == 1) {
             // First warning - resource penalties
             usedCPU += totalCPU * 0.2f; // 20% CPU penalty
@@ -813,13 +840,111 @@ public class ProcessManager {
             for (int i = 0; i < 2; i++) {
                 String name = "WARNING-" + random.nextInt(100);
                 Process warningProcess = new Process(name, 4, 8000, 120);
-                positionNewProcess(warningProcess);
-                processes.add(warningProcess);
+                repositionAllProcesses();
+                runningQueue.add(warningProcess);
             }
             
         } else if (criticalPenaltyCount >= 3) {
             // Third strike - game over on all difficulty levels
             gameOver = true;
+            gameOverReason = "CRITICAL FAILURE: Ignored 3 critical processes."; // Set reason
         }
+    }
+    
+    // Getters for queue sizes
+    public int getRunningQueueSize() {
+        return runningQueue.size();
+    }
+    
+    public int getReadyQueueSize() {
+        return readyQueue.size();
+    }
+    
+    public int getBlockedQueueSize() {
+        return blockedQueue.size();
+    }
+
+    private void checkGameOverCondition() {
+        if ((usedCPU >= totalCPU || usedMemory >= totalMemory) && !gameOver) {
+            // In easy mode, give a grace period before game over
+            if (difficultyLevel == 0) {
+                // Automatically terminate some lower priority processes
+                sortAndTerminateLowPriorityProcesses();
+            } else {
+                gameOver = true;
+                if (usedCPU >= totalCPU) { // Set reason based on condition
+                     gameOverReason = "CPU OVERLOAD: System resources exceeded.";
+                } else {
+                     gameOverReason = "MEMORY OVERLOAD: System resources exceeded.";
+                }
+            }
+        }
+    }
+
+    // Method to set the queue area references from GameView
+    public void setQueueAreaReferences(RectF newArea, RectF runningArea, RectF readyArea, RectF blockedArea) {
+        this.newProcessAreaRef = newArea;
+        this.runningQueueAreaRef = runningArea;
+        this.readyQueueAreaRef = readyArea;
+        this.blockedQueueAreaRef = blockedArea;
+    }
+
+    // Add this method to handle drops outside queues
+    public void repositionProcessBasedOnCurrentState(Process process) {
+        if (process == null) return;
+        
+        // Find which list it *should* be in based on its state
+        // (We assume the state is correct even if dropped outside)
+        // This implicitly calls repositionAllProcesses through the move methods
+        switch (process.getState()) {
+            case NEW:
+                // Should technically not happen if it was dragged, but handle anyway
+                if (!newProcesses.contains(process)) { // Add it back if somehow removed
+                    removeProcessFromAllQueues(process);
+                    newProcesses.add(process);
+                    repositionAllProcesses(); 
+                } else {
+                    repositionAllProcesses(); // Just reposition existing
+                }
+                break;
+            case RUNNING:
+                moveToRunningQueue(process); 
+                break;
+            case READY:
+                moveToReadyQueue(process); 
+                break;
+            case BLOCKED:
+                moveToBlockedQueue(process); 
+                break;
+            case TERMINATED:
+                // Should not be draggable, but remove if found
+                removeProcessFromAllQueues(process);
+                repositionAllProcesses();
+                break;
+        }
+    }
+
+    // Getters for queue capacities
+    public int getMaxProcessesCapacity() { // Renamed for clarity
+        return MAX_PROCESSES;
+    }
+    public int getRunningQueueCapacity() {
+        return RUNNING_QUEUE_SIZE;
+    }
+    public int getReadyQueueCapacity() {
+        return READY_QUEUE_SIZE;
+    }
+    public int getBlockedQueueCapacity() {
+        return BLOCKED_QUEUE_SIZE;
+    }
+
+    // Getter for the new processes list
+    public List<Process> getNewProcesses() {
+        return newProcesses;
+    }
+
+    // Getter for the game over reason
+    public String getGameOverReason() {
+        return gameOverReason;
     }
 } 
