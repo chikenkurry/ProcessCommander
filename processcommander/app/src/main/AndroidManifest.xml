@@ -39,6 +39,11 @@
             android:label="Credits"
             android:parentActivityName=".MainActivity" />
             
+        <activity 
+            android:name=".HighScoresActivity"
+            android:label="High Scores"
+            android:parentActivityName=".MainActivity" />
+            
     </application>
 
 </manifest>
