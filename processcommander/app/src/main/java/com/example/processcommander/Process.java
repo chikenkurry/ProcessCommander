@@ -186,11 +186,55 @@ public class Process {
         String stateLabel = (state == State.BLOCKED && isIOCompleted) ? "IO Done!" : state.getLabel(); // Show IO Done state
         canvas.drawText("P:" + priority + " | " + stateLabel, x, y + infoTextSize * 1.2f, paint);
 
+        // Draw CPU and Memory requirements
+        paint.setColor(Color.rgb(255, 235, 180)); // Light amber color for resource info
+        paint.setTextSize(infoTextSize * 0.9f);
+        
+        // Display CPU burst time remaining and memory required
+        String resourceText = "CPU: " + formatTime(cpuTimeRemaining) + " | MEM: " + memoryRequired + "MB";
+        canvas.drawText(resourceText, x, y + infoTextSize * 2.4f, paint);
+
+        // Draw resource bars
+        float barWidth = size * 0.7f;
+        float barHeight = size * 0.06f;
+        float barY = y + infoTextSize * 3.2f;
+        
+        // CPU bar background
+        paint.setColor(Color.DKGRAY);
+        RectF cpuBarBg = new RectF(x - barWidth/2, barY, x + barWidth/2, barY + barHeight);
+        canvas.drawRect(cpuBarBg, paint);
+        
+        // CPU bar foreground (shows percentage of time remaining)
+        float cpuPercent = Math.max(0, Math.min(1, (float)cpuTimeRemaining / cpuBurstTime));
+        paint.setColor(Color.rgb(65, 200, 245)); // Cyan for CPU
+        RectF cpuBarFg = new RectF(
+            cpuBarBg.left, 
+            cpuBarBg.top, 
+            cpuBarBg.left + cpuBarBg.width() * cpuPercent, 
+            cpuBarBg.bottom
+        );
+        canvas.drawRect(cpuBarFg, paint);
+        
+        // Memory bar background
+        paint.setColor(Color.DKGRAY);
+        RectF memBarBg = new RectF(x - barWidth/2, barY + barHeight + 5, x + barWidth/2, barY + barHeight*2 + 5);
+        canvas.drawRect(memBarBg, paint);
+        
+        // Memory bar foreground (fixed since memory requirement doesn't change)
+        paint.setColor(Color.rgb(245, 170, 65)); // Orange for memory
+        RectF memBarFg = new RectF(
+            memBarBg.left, 
+            memBarBg.top, 
+            memBarBg.left + memBarBg.width() * Math.min(1, memoryRequired / 200f), // Scale based on max expected memory
+            memBarBg.bottom
+        );
+        canvas.drawRect(memBarFg, paint);
+
         // Draw Interrupt Reason if any
         if (hasInterrupt && !interruptReason.isEmpty()) {
              paint.setColor(Color.YELLOW);
              paint.setTextSize(infoTextSize * 0.9f);
-             canvas.drawText(interruptReason, x, y + infoTextSize * 2.4f, paint);
+             canvas.drawText(interruptReason, x, y + infoTextSize * 5.0f, paint);
         }
         
         // Reset paint defaults
@@ -346,5 +390,14 @@ public class Process {
 
     private RectF getBounds() {
         return bounds;
+    }
+
+    // Helper method to format time in milliseconds to a readable format
+    private String formatTime(long timeMs) {
+        if (timeMs < 1000) {
+            return timeMs + "ms";
+        } else {
+            return String.format("%.1fs", timeMs / 1000f);
+        }
     }
 } 
