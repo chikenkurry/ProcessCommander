@@ -67,7 +67,7 @@ public class Process {
         this.creationTime = System.currentTimeMillis();
         this.bounds = new RectF();
         this.selected = false;
-        this.isCritical = name.startsWith("CRITICAL-");
+        this.isCritical = false;
         this.hasInterrupt = false;
         this.isIOCompleted = false;
         this.interruptReason = "";
@@ -90,7 +90,7 @@ public class Process {
             cpuTimeRemaining -= deltaTime * 1000; // Convert to milliseconds
             
             // Random chance to generate interrupt
-            if (!hasInterrupt && !isCritical && Math.random() < 0.02 * deltaTime) { // 2% chance per second
+            if (!hasInterrupt && Math.random() < 0.02 * deltaTime) { // 2% chance per second
                 generateInterrupt();
             }
         }
@@ -98,13 +98,8 @@ public class Process {
         // Update animation time
         animationTime += deltaTime;
         
-        // Update pulse effect for critical processes
-        if (isCritical && state != State.TERMINATED) {
-            // Pulsing effect
-            pulseScale = 1.0f + 0.2f * (float)Math.sin(animationTime * 5.0);
-        } else {
-            pulseScale = 1.0f;
-        }
+        // Set pulse scale to default - no critical processes
+        pulseScale = 1.0f;
     }
 
     private void generateInterrupt() {

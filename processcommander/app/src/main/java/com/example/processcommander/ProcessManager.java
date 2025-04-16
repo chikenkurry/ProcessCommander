@@ -209,6 +209,9 @@ public class ProcessManager {
     }
     
     private void startEmergencyEventThread() {
+        // Emergency event thread disabled - no critical processes will be created
+        // The original implementation:
+        /*
         threadPool.execute(new Runnable() {
             @Override
             public void run() {
@@ -234,6 +237,7 @@ public class ProcessManager {
                 }
             }
         });
+        */
     }
     
     private void startStarvationCheckerThread() {
